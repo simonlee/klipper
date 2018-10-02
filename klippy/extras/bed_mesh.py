@@ -136,12 +136,8 @@ class BedMeshCalibrate:
         self.probe_params = {}
         points = self._generate_points(config)
         self._init_probe_params(config, points)
-        self.probe_helper = probe.ProbePointsHelper(config, self, points)
-        self.z_endstop_pos = None
-        if config.has_section('stepper_z'):
-            zconfig = config.getsection('stepper_z')
-            self.z_endstop_pos = zconfig.getfloat(
-                'position_endstop', None)
+        self.probe_helper = probe.ProbePointsHelper(
+            config, self.probe_finalize, points)
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_command(
             'BED_MESH_CALIBRATE', self.cmd_BED_MESH_CALIBRATE,
@@ -203,18 +199,15 @@ class BedMeshCalibrate:
     cmd_BED_MESH_MAP_help = "Probe the bed and serialize output"
     def cmd_BED_MESH_MAP(self, params):
         self.build_map = True
-        self.start_calibration()
+        self.start_calibration(params)
     cmd_BED_MESH_CALIBRATE_help = "Perform Mesh Bed Leveling"
     def cmd_BED_MESH_CALIBRATE(self, params):
         self.build_map = False
-        self.start_calibration()
-    def start_calibration(self):
+        self.start_calibration(params)
+    def start_calibration(self, params):
         self.bedmesh.set_mesh(None)
         self.gcode.run_script_from_command("G28")
-        self.probe_helper.start_probe()
-    def get_probed_position(self):
-        kin = self.printer.lookup_object('toolhead').get_kinematics()
-        return kin.calc_position()
+        self.probe_helper.start_probe(params)
     def print_probed_positions(self, print_func):
         if self.probed_z_table is not None:
             msg = "Mesh Leveling Probed Z positions:\n"
@@ -225,22 +218,10 @@ class BedMeshCalibrate:
             print_func(msg)
         else:
             print_func("bed_mesh: bed has not been probed")
-    def finalize(self, offsets, positions):
+    def probe_finalize(self, offsets, positions):
         self.probe_params['x_offset'] = offsets[0]
         self.probe_params['y_offset'] = offsets[1]
         z_offset = offsets[2]
-        if self.probe_helper.get_last_xy_home_positon() is not None \
-                and self.z_endstop_pos is not None:
-            # Using probe as a virtual endstop, warn user if the
-            # stepper_z position_endstop is different
-            if self.z_endstop_pos != z_offset:
-                z_msg = "bed_mesh: WARN - probe z_offset is not" \
-                        " equal to Z position_endstop\n"
-                z_msg += "[probe] z_offset: %.4f\n" % z_offset
-                z_msg += "[stepper_z] position_endstop: %.4f" \
-                    % self.z_endstop_pos
-                logging.info(z_msg)
-                self.gcode.respond_info(z_msg)
         x_cnt = self.probe_params['x_count']
         y_cnt = self.probe_params['y_count']
         # create a 2-D array representing the probed z-positions.
@@ -248,11 +229,10 @@ class BedMeshCalibrate:
             [0. for i in range(x_cnt)] for j in range(y_cnt)]
         # Check for multi-sampled points
         z_table_len = x_cnt * y_cnt
-        if len(positions) % z_table_len:
+        if len(positions) != z_table_len:
             raise self.gcode.error(
                 ("bed_mesh: Invalid probe table length:\n"
                  "Sampled table length: %d") % len(positions))
-        samples = len(positions) / z_table_len
         # Populate the organized probed table
         for i in range(z_table_len):
             y_position = i / x_cnt
@@ -263,11 +243,8 @@ class BedMeshCalibrate:
             else:
                 # Odd y count, x probed in the negative directon
                 x_position = (x_cnt - 1) - (i % x_cnt)
-            idx = i * samples
-            end = idx + samples
-            avg_z = sum(p[2] for p in positions[idx:end]) / samples
             self.probed_z_table[y_position][x_position] = \
-                avg_z - z_offset
+                positions[i][2] - z_offset
         if self.build_map:
             outdict = {'z_probe_offsets:': self.probed_z_table}
             self.gcode.respond(json.dumps(outdict))
